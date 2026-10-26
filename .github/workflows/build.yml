@@ -1,0 +1,69 @@
+name: Build plugin bundles
+
+on:
+  push:
+    paths:
+      - '*.list'
+      - .no-ghcr
+      - .no-release
+      - Dockerfile
+      - scripts/**
+      - .github/workflows/build.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  packages: write
+
+# Serialize retries of one revision without cancelling unrelated list changes.
+concurrency:
+  group: plugin-bundles-${{ github.ref }}-${{ github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: "ubuntu-latest"
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Select lists
+        id: lists
+        env:
+          LISTS_FILE: ${{ runner.temp }}/plugin-lists.txt
+          BEFORE_SHA: ${{ github.event.before }}
+        run: python3 scripts/select_lists.py
+
+      - name: Build images and archives
+        id: bundles
+        if: steps.lists.outputs.count != '0' && (steps.lists.outputs.ghcr == 'true' || steps.lists.outputs.release == 'true')
+        env:
+          LISTS_FILE: ${{ runner.temp }}/plugin-lists.txt
+          RELEASE_ENABLED: ${{ steps.lists.outputs.release }}
+        run: bash scripts/build.sh
+
+      - name: Publish GHCR images
+        if: success() && steps.bundles.outcome == 'success' && steps.lists.outputs.ghcr == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/ghcr.sh
+
+      - name: Publish Release archives
+        # A failed GHCR push must not prevent an otherwise valid offline delivery.
+        if: ${{ !cancelled() && steps.bundles.outcome == 'success' && steps.lists.outputs.release == 'true' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/release.sh
+
+      - name: Clean temporary bundles
+        if: always() && steps.bundles.outputs.root != ''
+        env:
+          BUNDLE_BUILD_ROOT: ${{ steps.bundles.outputs.root }}
+        run: rm -rf -- "$BUNDLE_BUILD_ROOT"
