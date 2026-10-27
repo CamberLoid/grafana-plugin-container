@@ -1,15 +1,1 @@
-# Plugin ID with a pinned version.
-grafana-github-datasource 2.9.4
-
-# A bare plugin ID resolves to the latest linux-amd64 version.
-# grafana-github-datasource
-
-# Grafana plugin page: resolves to the latest version when the workflow runs.
-https://grafana.com/grafana/plugins/grafana-clock-panel/
-
-# Direct ZIP download: pin a version by using its download URL.
-# The URL does not need to end in .zip.
-https://grafana.com/api/plugins/yesoreyeram-infinity-datasource/versions/4.1.3/download
-
-# Direct plugin TAR archives are also supported (replace with your own URL).
-# https://plugins.example.com/custom-panel.tar.gz
+docs/example.list
