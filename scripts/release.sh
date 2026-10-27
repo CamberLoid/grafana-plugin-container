@@ -11,9 +11,9 @@ repo="$GH_HOST/$GITHUB_REPOSITORY"
 if ! gh release view "$BUNDLE_VERSION" --repo "$repo" >/dev/null 2>&1; then
   gh release create "$BUNDLE_VERSION" --repo "$repo" --target "$GITHUB_SHA" \
     --title "$BUNDLE_VERSION" --draft \
-    --notes "linux/amd64 plugin container images. Source: $GITHUB_SHA. Import tar.gz assets with docker load."
+    --notes "linux/amd64 plugin container images. Source: $GITHUB_SHA. Import archive assets with docker load."
 fi
-gh release upload "$BUNDLE_VERSION" "$BUNDLE_BUILD_ROOT"/artifacts/*.tar.gz \
+gh release upload "$BUNDLE_VERSION" "$BUNDLE_BUILD_ROOT"/artifacts/*.tar* \
   --repo "$repo" --clobber
 gh release edit "$BUNDLE_VERSION" --repo "$repo" --draft=false
 printf '\nRelease: %s/%s/releases/tag/%s\n' \

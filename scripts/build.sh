@@ -1,9 +1,17 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+USE_XZ="${USE_XZ:-true}"
+USE_GZ="${USE_GZ:-false}"
 docker info >/dev/null
 if [[ "$RELEASE_ENABLED" == true ]]; then
   command -v gh >/dev/null
+  if [[ "$USE_XZ" == true ]]; then
+    command -v xz >/dev/null
+  fi
+  if [[ "$USE_GZ" == true ]]; then
+    command -v gzip >/dev/null
+  fi
 fi
 BUNDLE_BUILD_ROOT=$(mktemp -d "$RUNNER_TEMP/plugin-bundles.XXXXXX")
 printf 'root=%s\n' "$BUNDLE_BUILD_ROOT" >> "$GITHUB_OUTPUT"
@@ -37,10 +45,22 @@ while IFS= read -r list; do
     --label "org.opencontainers.image.revision=$GITHUB_SHA" \
     --tag "$image:$BUNDLE_DATE" --tag "$image:$BUNDLE_VERSION" "$context"
   if [[ "$RELEASE_ENABLED" == true ]]; then
-    # Both filenames alias one archive, containing both image tags.
-    archive="$BUNDLE_BUILD_ROOT/artifacts/$name-$BUNDLE_VERSION.tar.gz"
-    docker save "$image:$BUNDLE_DATE" "$image:$BUNDLE_VERSION" | gzip -n > "$archive"
-    cp "$archive" "$BUNDLE_BUILD_ROOT/artifacts/$name-$BUNDLE_DATE.tar.gz"
+    # Export once, then compress the same image archive into each selected format.
+    archive="$BUNDLE_BUILD_ROOT/artifacts/$name-$BUNDLE_VERSION.tar"
+    docker save "$image:$BUNDLE_DATE" "$image:$BUNDLE_VERSION" > "$archive"
+    if [[ "$USE_XZ" == true ]]; then
+      xz -9 -c "$archive" > "$archive.xz"
+      cp "$archive.xz" "$BUNDLE_BUILD_ROOT/artifacts/$name-$BUNDLE_DATE.tar.xz"
+    fi
+    if [[ "$USE_GZ" == true ]]; then
+      gzip -9 -n -c "$archive" > "$archive.gz"
+      cp "$archive.gz" "$BUNDLE_BUILD_ROOT/artifacts/$name-$BUNDLE_DATE.tar.gz"
+    fi
+    if [[ "$USE_XZ" == true || "$USE_GZ" == true ]]; then
+      rm -- "$archive"
+    else
+      cp "$archive" "$BUNDLE_BUILD_ROOT/artifacts/$name-$BUNDLE_DATE.tar"
+    fi
   fi
   printf '| `%s` | `%s` |\n' "$list" "$image:$BUNDLE_VERSION" >> "$GITHUB_STEP_SUMMARY"
 done < "$BUNDLE_BUILD_ROOT/lists.txt"

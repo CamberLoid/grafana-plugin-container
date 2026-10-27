@@ -10,6 +10,15 @@ on:
       - scripts/**
       - .github/workflows/build.yml
   workflow_dispatch:
+    inputs:
+      use_xz:
+        description: Generate .tar.xz Release archives
+        type: boolean
+        default: true
+      use_gz:
+        description: 'Generate .tar.gz Release archives (both off: plain .tar)'
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -47,6 +56,8 @@ jobs:
         env:
           LISTS_FILE: ${{ runner.temp }}/plugin-lists.txt
           RELEASE_ENABLED: ${{ steps.lists.outputs.release }}
+          USE_XZ: ${{ github.event_name != 'workflow_dispatch' || inputs.use_xz }}
+          USE_GZ: ${{ github.event_name == 'workflow_dispatch' && inputs.use_gz }}
         run: bash scripts/build.sh
 
       - name: Publish GHCR images

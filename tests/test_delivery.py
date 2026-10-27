@@ -3,6 +3,7 @@
 import gzip
 import io
 import json
+import lzma
 import os
 from pathlib import Path
 import shutil
@@ -85,7 +86,9 @@ elif command == 'upload':
     if os.environ.get('FAIL_UPLOAD'):
         status = 1
     else:
-        state['assets'] = sorted(Path(p).name for p in a[3:a.index('--repo')])
+        uploads = [Path(p) for p in a[3:a.index('--repo')]]
+        assert all(p.is_file() for p in uploads)
+        state['assets'] = sorted(set(state['assets']) | {p.name for p in uploads})
 elif command == 'edit':
     assert '--draft=false' in a
     state['draft'] = False
@@ -97,7 +100,7 @@ with open('calls.jsonl', 'a') as log:
 sys.exit(status)
 """)
         self.env = dict(os.environ)
-        for key in ("GH_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_TOKEN", "GITHUB_ENTERPRISE_TOKEN"):
+        for key in ("GH_TOKEN", "GH_ENTERPRISE_TOKEN", "GITHUB_TOKEN", "GITHUB_ENTERPRISE_TOKEN", "USE_XZ", "USE_GZ"):
             self.env.pop(key, None)
         self.env.update({
             "PATH": str(self.root / "bin") + os.pathsep + os.environ["PATH"],
@@ -152,12 +155,12 @@ sys.exit(status)
         self.phase("release")
         artifacts = Path(self.env["BUNDLE_BUILD_ROOT"]) / "artifacts"
         self.assertEqual(sorted(p.name for p in artifacts.iterdir()), [
-            "bundle-2026-10-26-abcdef0.tar.gz", "bundle-2026-10-26.tar.gz",
-            "empty-2026-10-26-abcdef0.tar.gz", "empty-2026-10-26.tar.gz",
+            "bundle-2026-10-26-abcdef0.tar.xz", "bundle-2026-10-26.tar.xz",
+            "empty-2026-10-26-abcdef0.tar.xz", "empty-2026-10-26.tar.xz",
         ])
-        first = artifacts / "bundle-2026-10-26-abcdef0.tar.gz"
-        self.assertEqual(first.read_bytes(), (artifacts / "bundle-2026-10-26.tar.gz").read_bytes())
-        with gzip.open(first, "rb") as compressed, tarfile.open(fileobj=compressed) as archive:
+        first = artifacts / "bundle-2026-10-26-abcdef0.tar.xz"
+        self.assertEqual(first.read_bytes(), (artifacts / "bundle-2026-10-26.tar.xz").read_bytes())
+        with lzma.open(first, "rb") as compressed, tarfile.open(fileobj=compressed) as archive:
             tags = json.load(archive.extractfile("manifest.json"))[0]["RepoTags"]
         self.assertEqual(tags, ["ghcr.io/acme/plugins/bundle:2026-10-26", "ghcr.io/acme/plugins/bundle:2026-10-26-abcdef0"])
         builds = [r for r in self.calls("docker") if r["args"][0] == "build"]
@@ -167,10 +170,70 @@ sys.exit(status)
         self.assertFalse(json.loads((self.root / "release-state.json").read_text())["draft"])
 
     def test_ghcr_only_does_not_save_or_create_release(self):
+        self.env.update(USE_XZ="true", USE_GZ="true")
+        self.tool("xz", "sys.exit('xz must not run when Release is disabled')")
+        self.tool("gzip", "sys.exit('gzip must not run when Release is disabled')")
         self.select(release=False)
         self.phase("build")
         self.phase("ghcr")
         self.assertFalse(any(r["args"][0] == "save" for r in self.calls("docker")))
+        self.assertEqual(self.calls("gh"), [])
+
+    def test_compression_choices_preserve_contents_names_and_release_history(self):
+        self.select(ghcr=False)
+        history = set()
+        for use_xz, use_gz, formats in (
+            (True, False, ("tar.xz",)),
+            (False, True, ("tar.gz",)),
+            (False, False, ("tar",)),
+            (True, True, ("tar.xz", "tar.gz")),
+        ):
+            with self.subTest(use_xz=use_xz, use_gz=use_gz):
+                self.env.update(USE_XZ=str(use_xz).lower(), USE_GZ=str(use_gz).lower())
+                previous_saves = sum(r["args"][0] == "save" for r in self.calls("docker"))
+                self.phase("build")
+                artifacts = Path(self.env["BUNDLE_BUILD_ROOT"]) / "artifacts"
+                expected = sorted("{}-2026-10-26{}.{}".format(name, suffix, extension)
+                                  for name in ("bundle", "empty")
+                                  for suffix in ("", "-abcdef0") for extension in formats)
+                self.assertEqual(sorted(p.name for p in artifacts.iterdir()), expected)
+                payloads = []
+                for extension in formats:
+                    versioned = artifacts / ("bundle-2026-10-26-abcdef0." + extension)
+                    dated = artifacts / ("bundle-2026-10-26." + extension)
+                    content = versioned.read_bytes()
+                    self.assertEqual(content, dated.read_bytes())
+                    if extension == "tar.xz":
+                        content = lzma.decompress(content)
+                    elif extension == "tar.gz":
+                        content = gzip.decompress(content)
+                    payloads.append(content)
+                    with tarfile.open(fileobj=io.BytesIO(content)) as archive:
+                        tags = json.load(archive.extractfile("manifest.json"))[0]["RepoTags"]
+                    self.assertEqual(tags, ["ghcr.io/acme/plugins/bundle:2026-10-26",
+                                            "ghcr.io/acme/plugins/bundle:2026-10-26-abcdef0"])
+                self.assertTrue(all(payload == payloads[0] for payload in payloads))
+                self.assertEqual(sum(r["args"][0] == "save" for r in self.calls("docker")) - previous_saves, 2)
+                self.phase("release")
+                upload = next(r for r in reversed(self.calls("gh")) if r["args"][1] == "upload")
+                self.assertEqual(sorted(Path(p).name for p in upload["args"][3:upload["args"].index("--repo")]), expected)
+                history.update(expected)
+                state = json.loads((self.root / "release-state.json").read_text())
+                self.assertEqual(set(state["assets"]), history)
+
+    def test_push_without_inputs_defaults_to_xz(self):
+        self.env["GITHUB_EVENT_NAME"] = "push"
+        self.select()
+        self.phase("build")
+        artifacts = Path(self.env["BUNDLE_BUILD_ROOT"]) / "artifacts"
+        self.assertEqual(len(list(artifacts.iterdir())), 4)
+        self.assertTrue(all(p.name.endswith(".tar.xz") for p in artifacts.iterdir()))
+
+    def test_failed_compression_fails_build_before_publication(self):
+        self.tool("xz", "sys.exit(1)")
+        self.select()
+        self.assertNotEqual(self.phase("build", check=False).returncode, 0)
+        self.assertFalse(any(r["args"][0] in ("login", "push") for r in self.calls("docker")))
         self.assertEqual(self.calls("gh"), [])
 
     def test_release_only_does_not_login_or_push(self):
